@@ -28,6 +28,7 @@ import logging
 log = logging.getLogger(__name__)
 
 from uuid import UUID, uuid4
+from gns3server.utils.interfaces import is_interface_up
 from ..config import Config
 from ..utils.asyncio import wait_run_in_executor
 from .project_manager import ProjectManager
@@ -36,6 +37,7 @@ from .nios.nio_udp import NIOUDP
 from .nios.nio_tap import NIOTAP
 from .nios.nio_nat import NIONAT
 from .nios.nio_generic_ethernet import NIOGenericEthernet
+from ..utils.images import md5sum, remove_checksum
 
 
 class BaseManager:
@@ -113,7 +115,7 @@ class BaseManager:
             for future in done:
                 try:
                     future.result()
-                except Exception as e:
+                except (Exception, GeneratorExit) as e:
                     log.error("Could not close VM {}".format(e), exc_info=1)
                     continue
 
@@ -357,20 +359,29 @@ class BaseManager:
             rhost = nio_settings["rhost"]
             rport = nio_settings["rport"]
             try:
-                # TODO: handle IPv6
-                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                    sock.connect((rhost, rport))
+                info = socket.getaddrinfo(rhost, rport, socket.AF_UNSPEC, socket.SOCK_DGRAM, 0, socket.AI_PASSIVE)
+                if not info:
+                    raise aiohttp.web.HTTPInternalServerError(text="getaddrinfo returns an empty list on {}:{}".format(rhost, rport))
+                for res in info:
+                    af, socktype, proto, _, sa = res
+                    with socket.socket(af, socktype, proto) as sock:
+                        sock.connect(sa)
             except OSError as e:
                 raise aiohttp.web.HTTPInternalServerError(text="Could not create an UDP connection to {}:{}: {}".format(rhost, rport, e))
             nio = NIOUDP(lport, rhost, rport)
         elif nio_settings["type"] == "nio_tap":
             tap_device = nio_settings["tap_device"]
-            #FIXME: check for permissions on tap device
-            #if not self._has_privileged_access(executable):
+            if not is_interface_up(tap_device):
+                raise aiohttp.web.HTTPConflict(text="TAP interface {} does not exist or is down".format(tap_device))
+            # FIXME: check for permissions on tap device
+            # if not self._has_privileged_access(executable):
             #    raise aiohttp.web.HTTPForbidden(text="{} has no privileged access to {}.".format(executable, tap_device))
             nio = NIOTAP(tap_device)
         elif nio_settings["type"] == "nio_generic_ethernet":
-            nio = NIOGenericEthernet(nio_settings["ethernet_device"])
+            ethernet_device = nio_settings["ethernet_device"]
+            if not is_interface_up(ethernet_device):
+                raise aiohttp.web.HTTPConflict(text="Ethernet interface {} does not exist or is down".format(ethernet_device))
+            nio = NIOGenericEthernet(ethernet_device)
         elif nio_settings["type"] == "nio_nat":
             nio = NIONAT()
         assert nio is not None
@@ -419,9 +430,47 @@ class BaseManager:
             return os.path.basename(path)
         return path
 
+    @asyncio.coroutine
+    def list_images(self):
+        """
+        Return the list of available images for this VM type
+
+        :returns: Array of hash
+        """
+
+        try:
+            files = os.listdir(self.get_images_directory())
+        except FileNotFoundError:
+            return []
+        files.sort()
+        images = []
+        for filename in files:
+            if filename[0] != "." and not filename.endswith(".md5sum"):
+                images.append({"filename": filename})
+        return images
+
     def get_images_directory(self):
         """
         Get the image directory on disk
         """
 
         raise NotImplementedError
+
+    @asyncio.coroutine
+    def write_image(self, filename, stream):
+        directory = self.get_images_directory()
+        path = os.path.join(directory, os.path.basename(filename))
+        log.info("Writting image file %s", path)
+        try:
+            remove_checksum(path)
+            os.makedirs(directory, exist_ok=True)
+            with open(path, 'wb+') as f:
+                while True:
+                    packet = yield from stream.read(512)
+                    if not packet:
+                        break
+                    f.write(packet)
+            os.chmod(path, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+            md5sum(path)
+        except OSError as e:
+            raise aiohttp.web.HTTPConflict(text="Could not write image: {} to {}".format(filename, e))

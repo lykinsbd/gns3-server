@@ -41,8 +41,7 @@ def manager(port_manager):
 @pytest.fixture
 def fake_qemu_img_binary():
 
-    # Should not crash with unicode characters
-    bin_path = os.path.join(os.environ["PATH"], "qemu-img\u62FF")
+    bin_path = os.path.join(os.environ["PATH"], "qemu-img")
     with open(bin_path, "w+") as f:
         f.write("1")
     os.chmod(bin_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
@@ -53,9 +52,9 @@ def fake_qemu_img_binary():
 def fake_qemu_binary():
 
     if sys.platform.startswith("win"):
-        bin_path = os.path.join(os.environ["PATH"], "qemu_x42.EXE")
+        bin_path = os.path.join(os.environ["PATH"], "qemu-system-x86_64.EXE")
     else:
-        bin_path = os.path.join(os.environ["PATH"], "qemu_x42")
+        bin_path = os.path.join(os.environ["PATH"], "qemu-system-x86_64")
     with open(bin_path, "w+") as f:
         f.write("1")
     os.chmod(bin_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
@@ -115,6 +114,43 @@ def test_stop(loop, vm, running_subprocess_mock):
         process.terminate.assert_called_with()
 
 
+def test_termination_callback(vm):
+
+    vm.status = "started"
+    queue = vm.project.get_listen_queue()
+
+    vm._termination_callback(0)
+    assert vm.status == "stopped"
+
+    (action, event) = queue.get_nowait()
+    assert action == "vm.stopped"
+    assert event == vm
+
+    with pytest.raises(asyncio.queues.QueueEmpty):
+        queue.get_nowait()
+
+
+def test_termination_callback_error(vm, tmpdir):
+
+    with open(str(tmpdir / "qemu.log"), "w+") as f:
+        f.write("BOOMM")
+
+    vm.status = "started"
+    vm._stdout_file = str(tmpdir / "qemu.log")
+    queue = vm.project.get_listen_queue()
+
+    vm._termination_callback(1)
+    assert vm.status == "stopped"
+
+    (action, event) = queue.get_nowait()
+    assert action == "vm.stopped"
+    assert event == vm
+
+    (action, event) = queue.get_nowait()
+    assert action == "log.error"
+    assert event["message"] == "QEMU process has stopped, return code: 1\nBOOMM"
+
+
 def test_reload(loop, vm):
 
     with asyncio_patch("gns3server.modules.qemu.QemuVM._control_vm") as mock:
@@ -137,11 +173,11 @@ def test_add_nio_binding_udp(vm, loop):
     assert nio.lport == 4242
 
 
-def test_add_nio_binding_ethernet(vm, loop):
+def test_add_nio_binding_ethernet(vm, loop, ethernet_device):
     with patch("gns3server.modules.base_manager.BaseManager._has_privileged_access", return_value=True):
-        nio = Qemu.instance().create_nio(vm.qemu_path, {"type": "nio_generic_ethernet", "ethernet_device": "eth0"})
+        nio = Qemu.instance().create_nio(vm.qemu_path, {"type": "nio_generic_ethernet", "ethernet_device": ethernet_device})
         loop.run_until_complete(asyncio.async(vm.adapter_add_nio_binding(0, nio)))
-        assert nio.ethernet_device == "eth0"
+        assert nio.ethernet_device == ethernet_device
 
 
 def test_port_remove_nio_binding(vm, loop):
@@ -172,7 +208,9 @@ def test_set_qemu_path(vm, tmpdir, fake_qemu_binary):
         vm.qemu_path = None
 
     # Should not crash with unicode characters
-    path = str(tmpdir / "bla\u62FF")
+    path = str(tmpdir / "\u62FF" / "qemu-system-mips")
+
+    os.makedirs(str(tmpdir / "\u62FF"))
 
     # Raise because file doesn't exists
     with pytest.raises(QemuError):
@@ -190,23 +228,57 @@ def test_set_qemu_path(vm, tmpdir, fake_qemu_binary):
 
     vm.qemu_path = path
     assert vm.qemu_path == path
+    assert vm.platform == "mips"
 
 
 def test_set_qemu_path_environ(vm, tmpdir, fake_qemu_binary):
 
     # It should find the binary in the path
-    vm.qemu_path = "qemu_x42"
+    vm.qemu_path = "qemu-system-x86_64"
 
     assert vm.qemu_path == fake_qemu_binary
+    assert vm.platform == "x86_64"
 
 
-def test_disk_options(vm, loop, fake_qemu_img_binary):
+@pytest.mark.skipif(sys.platform.startswith("linux") is False, reason="Supported only on linux")
+def test_set_qemu_path_kvm_binary(vm, tmpdir, fake_qemu_binary):
+
+    bin_path = os.path.join(os.environ["PATH"], "qemu-kvm")
+    with open(bin_path, "w+") as f:
+        f.write("1")
+    os.chmod(bin_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    return bin_path
+
+    # It should find the binary in the path
+    vm.qemu_path = "qemu-kvm"
+
+    assert vm.qemu_path == fake_qemu_binary
+    assert vm.platform == "x86_64"
+
+
+def test_set_platform(project, manager):
+
+    with patch("shutil.which", return_value="/bin/qemu-system-x86_64") as which_mock:
+        with patch("gns3server.modules.qemu.QemuVM._check_qemu_path"):
+            vm = QemuVM("test", "00010203-0405-0607-0809-0a0b0c0d0e0f", project, manager, platform="x86_64")
+            if sys.platform.startswith("win"):
+                which_mock.assert_called_with("qemu-system-x86_64w.exe")
+            else:
+                which_mock.assert_called_with("qemu-system-x86_64")
+    assert vm.platform == "x86_64"
+    assert vm.qemu_path == "/bin/qemu-system-x86_64"
+
+
+def test_disk_options(vm, tmpdir, loop, fake_qemu_img_binary):
+
+    vm._hda_disk_image = str(tmpdir / "test.qcow2")
+    open(vm._hda_disk_image, "w+").close()
 
     with asyncio_patch("asyncio.create_subprocess_exec", return_value=MagicMock()) as process:
         loop.run_until_complete(asyncio.async(vm._disk_options()))
         assert process.called
         args, kwargs = process.call_args
-        assert args == (fake_qemu_img_binary, "create", "-f", "qcow2", os.path.join(vm.working_dir, "flash.qcow2"), "256M")
+        assert args == (fake_qemu_img_binary, "create", "-o", "backing_file={}".format(vm._hda_disk_image), "-f", "qcow2", os.path.join(vm.working_dir, "hda_disk.qcow2"))
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="Not supported on Windows")
@@ -268,8 +340,6 @@ def test_build_command(vm, loop, fake_qemu_binary, port_manager):
             "test",
             "-m",
             "256",
-            "-hda",
-            os.path.join(vm.working_dir, "flash.qcow2"),
             "-serial",
             "telnet:127.0.0.1:{},server,nowait".format(vm.console),
             "-net",
@@ -331,3 +401,26 @@ def test_hdd_disk_image(vm, tmpdir):
         assert vm.hdd_disk_image == "/tmp/test"
         vm.hdd_disk_image = "test"
         assert vm.hdd_disk_image == str(tmpdir / "QEMU" / "test")
+
+
+def test_options(vm):
+    vm.kvm = False
+    vm.options = "-usb"
+    assert vm.options == "-usb"
+    assert vm.kvm is False
+
+
+def test_get_qemu_img(vm, tmpdir):
+
+    open(str(tmpdir / "qemu-sytem-x86_64"), "w+").close()
+    open(str(tmpdir / "qemu-img"), "w+").close()
+    vm._qemu_path = str(tmpdir / "qemu-sytem-x86_64")
+    assert vm._get_qemu_img() == str(tmpdir / "qemu-img")
+
+
+def test_get_qemu_img_not_exist(vm, tmpdir):
+
+    open(str(tmpdir / "qemu-sytem-x86_64"), "w+").close()
+    vm._qemu_path = str(tmpdir / "qemu-sytem-x86_64")
+    with pytest.raises(QemuError):
+        vm._get_qemu_img()

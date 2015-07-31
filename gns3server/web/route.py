@@ -26,6 +26,7 @@ import traceback
 log = logging.getLogger(__name__)
 
 from ..modules.vm_error import VMError
+from ..ubridge.ubridge_error import UbridgeError
 from .response import Response
 from ..crash_report import CrashReport
 from ..config import Config
@@ -114,6 +115,7 @@ class Route(object):
         output_schema = kw.get("output", {})
         input_schema = kw.get("input", {})
         api_version = kw.get("api_version", 1)
+        raw = kw.get("raw", False)
 
         # If it's a JSON api endpoint just register the endpoint an do nothing
         if api_version is None:
@@ -151,8 +153,9 @@ class Route(object):
                     return response
 
                 # Non API call
-                if api_version is None:
+                if api_version is None or raw is True:
                     response = Response(request=request, route=route, output_schema=output_schema)
+
                     yield from func(request, response)
                     return response
 
@@ -177,7 +180,7 @@ class Route(object):
                     response = Response(request=request, route=route)
                     response.set_status(e.status)
                     response.json({"message": e.text, "status": e.status})
-                except VMError as e:
+                except (VMError, UbridgeError) as e:
                     log.error("VM error detected: {type}".format(type=type(e)), exc_info=1)
                     response = Response(request=request, route=route)
                     response.set_status(409)
@@ -188,7 +191,7 @@ class Route(object):
                     response.set_status(408)
                     response.json({"message": "Request canceled", "status": 408})
                 except aiohttp.ClientDisconnectedError:
-                    log.error("Client disconnected")
+                    log.warn("Client disconnected")
                     response = Response(request=request, route=route)
                     response.set_status(408)
                     response.json({"message": "Client disconnected", "status": 408})

@@ -103,3 +103,33 @@ PROJECT_OBJECT_SCHEMA = {
     "additionalProperties": False,
     "required": ["location", "project_id", "temporary"]
 }
+
+PROJECT_LIST_SCHEMA = {
+    "$schema": "http://json-schema.org/draft-04/schema#",
+    "description": "List of projects",
+    "type": "array",
+    "items": PROJECT_OBJECT_SCHEMA
+}
+
+PROJECT_FILE_LIST_SCHEMA = {
+    "$schema": "http://json-schema.org/draft-04/schema#",
+    "description": "List files in the project",
+    "type": "array",
+    "items": [
+        {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "description": "File path",
+                    "type": ["string"]
+                },
+                "md5sum": {
+                    "description": "MD5 hash of the file",
+                    "type": ["string"]
+                },
+
+            },
+        }
+    ],
+    "additionalProperties": False,
+}

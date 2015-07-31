@@ -43,6 +43,7 @@ def test_vpcs_get(server, project, vm):
     assert response.json["name"] == "PC TEST 1"
     assert response.json["project_id"] == project.id
     assert response.json["startup_script_path"] is None
+    assert response.json["status"] == "stopped"
 
 
 def test_vpcs_create_startup_script(server, project):
@@ -75,10 +76,10 @@ def test_vpcs_nio_create_udp(server, vm):
     assert response.json["type"] == "nio_udp"
 
 
-def test_vpcs_nio_create_tap(server, vm):
+def test_vpcs_nio_create_tap(server, vm, ethernet_device):
     with patch("gns3server.modules.base_manager.BaseManager._has_privileged_access", return_value=True):
         response = server.post("/projects/{project_id}/vpcs/vms/{vm_id}/adapters/0/ports/0/nio".format(project_id=vm["project_id"], vm_id=vm["vm_id"]), {"type": "nio_tap",
-                                                                                                                                                         "tap_device": "test"})
+                                                                                                                                                         "tap_device": ethernet_device})
         assert response.status == 201
         assert response.route == "/projects/{project_id}/vpcs/vms/{vm_id}/adapters/{adapter_number:\d+}/ports/{port_number:\d+}/nio"
         assert response.json["type"] == "nio_tap"
@@ -95,6 +96,7 @@ def test_vpcs_delete_nio(server, vm):
 
 
 def test_vpcs_start(server, vm):
+
     with asyncio_patch("gns3server.modules.vpcs.vpcs_vm.VPCSVM.start", return_value=True) as mock:
         response = server.post("/projects/{project_id}/vpcs/vms/{vm_id}/start".format(project_id=vm["project_id"], vm_id=vm["vm_id"]), example=True)
         assert mock.called

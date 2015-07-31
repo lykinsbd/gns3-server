@@ -1,6 +1,6 @@
-curl -i -X PUT 'http://localhost:8000/v1/projects/a1e920ca-338a-4e9f-b363-aa607b09dd80/virtualbox/vms/514963f5-93f8-4d18-bcd6-7d50ef7164a6' -d '{"console": 2010, "name": "test"}'
+curl -i -X PUT 'http://localhost:8000/v1/projects/a1e920ca-338a-4e9f-b363-aa607b09dd80/virtualbox/vms/6399384f-5127-4af6-aab4-f255538e5e8a' -d '{"console": 2010, "name": "test"}'
 
-PUT /v1/projects/a1e920ca-338a-4e9f-b363-aa607b09dd80/virtualbox/vms/514963f5-93f8-4d18-bcd6-7d50ef7164a6 HTTP/1.1
+PUT /v1/projects/a1e920ca-338a-4e9f-b363-aa607b09dd80/virtualbox/vms/6399384f-5127-4af6-aab4-f255538e5e8a HTTP/1.1
 {
     "console": 2010,
     "name": "test"
@@ -8,14 +8,16 @@ PUT /v1/projects/a1e920ca-338a-4e9f-b363-aa607b09dd80/virtualbox/vms/514963f5-93
 
 
 HTTP/1.1 200
+ACCESS-CONTROL-ALLOW-ORIGIN: *
 CONNECTION: keep-alive
-CONTENT-LENGTH: 359
+CONTENT-LENGTH: 413
 CONTENT-TYPE: application/json
 DATE: Thu, 08 Jan 2015 16:09:15 GMT
-SERVER: Python/3.4 GNS3/1.3.1.rc2
+SERVER: Python/3.4 GNS3/1.4.0dev3
 X-ROUTE: /v1/projects/{project_id}/virtualbox/vms/{vm_id}
 
 {
+    "acpi_shutdown": false,
     "adapter_type": "Intel PRO/1000 MT Desktop (82540EM)",
     "adapters": 0,
     "console": 2010,
@@ -25,6 +27,7 @@ X-ROUTE: /v1/projects/{project_id}/virtualbox/vms/{vm_id}
     "project_id": "a1e920ca-338a-4e9f-b363-aa607b09dd80",
     "ram": 0,
     "use_any_adapter": false,
-    "vm_id": "514963f5-93f8-4d18-bcd6-7d50ef7164a6",
+    "vm_directory": null,
+    "vm_id": "6399384f-5127-4af6-aab4-f255538e5e8a",
     "vmname": "VMTEST"
 }

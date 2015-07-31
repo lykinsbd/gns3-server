@@ -72,6 +72,7 @@ def test_vm_invalid_vpcs_path(project, manager, loop):
 def test_start(loop, vm):
     process = MagicMock()
     process.returncode = None
+    queue = vm.project.get_listen_queue()
 
     with asyncio_patch("gns3server.modules.vpcs.vpcs_vm.VPCSVM._check_requirements", return_value=True):
         with asyncio_patch("asyncio.create_subprocess_exec", return_value=process):
@@ -79,6 +80,9 @@ def test_start(loop, vm):
             vm.port_add_nio_binding(0, nio)
             loop.run_until_complete(asyncio.async(vm.start()))
             assert vm.is_running()
+    (action, event) = queue.get_nowait()
+    assert action == "vm.started"
+    assert event == vm
 
 
 def test_stop(loop, vm):
@@ -98,6 +102,8 @@ def test_stop(loop, vm):
             loop.run_until_complete(asyncio.async(vm.start()))
             assert vm.is_running()
 
+            queue = vm.project.get_listen_queue()
+
             with asyncio_patch("gns3server.utils.asyncio.wait_for_process_termination"):
                 loop.run_until_complete(asyncio.async(vm.stop()))
             assert vm.is_running() is False
@@ -106,6 +112,10 @@ def test_stop(loop, vm):
                 process.send_signal.assert_called_with(1)
             else:
                 process.terminate.assert_called_with()
+
+            (action, event) = queue.get_nowait()
+            assert action == "vm.stopped"
+            assert event == vm
 
 
 def test_reload(loop, vm):
@@ -140,11 +150,11 @@ def test_add_nio_binding_udp(vm):
     assert nio.lport == 4242
 
 
-def test_add_nio_binding_tap(vm):
+def test_add_nio_binding_tap(vm, ethernet_device):
     with patch("gns3server.modules.base_manager.BaseManager._has_privileged_access", return_value=True):
-        nio = VPCS.instance().create_nio(vm.vpcs_path, {"type": "nio_tap", "tap_device": "test"})
+        nio = VPCS.instance().create_nio(vm.vpcs_path, {"type": "nio_tap", "tap_device": ethernet_device})
         vm.port_add_nio_binding(0, nio)
-        assert nio.tap_device == "test"
+        assert nio.tap_device == ethernet_device
 
 
 # def test_add_nio_binding_tap_no_privileged_access(vm):
@@ -192,7 +202,7 @@ def test_update_startup_script_h(vm):
 def test_get_startup_script(vm):
     content = "echo GNS3 VPCS\nip 192.168.1.2"
     vm.startup_script = content
-    assert vm.startup_script == os.linesep.join(["echo GNS3 VPCS","ip 192.168.1.2"])
+    assert vm.startup_script == os.linesep.join(["echo GNS3 VPCS", "ip 192.168.1.2"])
 
 
 def test_get_startup_script_using_default_script(vm):

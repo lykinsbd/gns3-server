@@ -25,6 +25,7 @@ from ...schemas.dynamips_vm import VM_UPDATE_SCHEMA
 from ...schemas.dynamips_vm import VM_CAPTURE_SCHEMA
 from ...schemas.dynamips_vm import VM_OBJECT_SCHEMA
 from ...schemas.dynamips_vm import VM_CONFIGS_SCHEMA
+from ...schemas.dynamips_vm import VMS_LIST_SCHEMA
 from ...modules.dynamips import Dynamips
 from ...modules.dynamips.dynamips_error import DynamipsError
 from ...modules.project_manager import ProjectManager
@@ -73,7 +74,6 @@ class DynamipsVMHandler:
                                                    chassis=request.json.pop("chassis", default_chassis))
 
         yield from dynamips_manager.update_vm_settings(vm, request.json)
-        yield from dynamips_manager.ghost_ios_support(vm)
         response.set_status(201)
         response.json(vm)
 
@@ -119,7 +119,6 @@ class DynamipsVMHandler:
         vm = dynamips_manager.get_vm(request.match_info["vm_id"], project_id=request.match_info["project_id"])
 
         yield from dynamips_manager.update_vm_settings(vm, request.json)
-        yield from dynamips_manager.ghost_ios_support(vm)
         response.json(vm)
 
     @classmethod
@@ -160,6 +159,7 @@ class DynamipsVMHandler:
 
         dynamips_manager = Dynamips.instance()
         vm = dynamips_manager.get_vm(request.match_info["vm_id"], project_id=request.match_info["project_id"])
+        yield from dynamips_manager.ghost_ios_support(vm)
         yield from vm.start()
         response.set_status(204)
 
@@ -450,3 +450,30 @@ class DynamipsVMHandler:
         idlepc = yield from dynamips_manager.auto_idlepc(vm)
         response.set_status(200)
         response.json({"idlepc": idlepc})
+
+    @Route.get(
+        r"/dynamips/vms",
+        status_codes={
+            200: "List of Dynamips VM retrieved",
+        },
+        description="Retrieve the list of Dynamips VMS",
+        output=VMS_LIST_SCHEMA)
+    def list_vms(request, response):
+
+        dynamips_manager = Dynamips.instance()
+        vms = yield from dynamips_manager.list_images()
+        response.set_status(200)
+        response.json(vms)
+
+    @Route.post(
+        r"/dynamips/vms/{filename}",
+        status_codes={
+            204: "Image uploaded",
+        },
+        raw=True,
+        description="Upload Dynamips image.")
+    def upload_vm(request, response):
+
+        dynamips_manager = Dynamips.instance()
+        yield from dynamips_manager.write_image(request.match_info["filename"], request.content)
+        response.set_status(204)

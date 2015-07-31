@@ -27,16 +27,16 @@ import signal
 import re
 import asyncio
 import shutil
-import gns3server.utils.asyncio
 
+from gns3server.utils.asyncio import wait_for_process_termination
+from gns3server.utils.asyncio import monitor_process
+from gns3server.utils.asyncio import subprocess_check_output
 from pkg_resources import parse_version
 from .vpcs_error import VPCSError
 from ..adapters.ethernet_adapter import EthernetAdapter
 from ..nios.nio_udp import NIOUDP
 from ..nios.nio_tap import NIOTAP
 from ..base_vm import BaseVM
-from ...utils.asyncio import subprocess_check_output
-
 
 import logging
 log = logging.getLogger(__name__)
@@ -109,6 +109,8 @@ class VPCSVM(BaseVM):
 
         return {"name": self.name,
                 "vm_id": self.id,
+                "vm_directory": self.working_dir,
+                "status": self.status,
                 "console": self._console,
                 "project_id": self.project.id,
                 "startup_script": self.startup_script,
@@ -233,12 +235,28 @@ class VPCSVM(BaseVM):
                                                                               stderr=subprocess.STDOUT,
                                                                               cwd=self.working_dir,
                                                                               creationflags=flags)
+                    monitor_process(self._process, self._termination_callback)
                 log.info("VPCS instance {} started PID={}".format(self.name, self._process.pid))
                 self._started = True
+                self.status = "started"
             except (OSError, subprocess.SubprocessError) as e:
                 vpcs_stdout = self.read_vpcs_stdout()
                 log.error("Could not start VPCS {}: {}\n{}".format(self.vpcs_path, e, vpcs_stdout))
                 raise VPCSError("Could not start VPCS {}: {}\n{}".format(self.vpcs_path, e, vpcs_stdout))
+
+    def _termination_callback(self, returncode):
+        """
+        Called when the process has stopped.
+
+        :param returncode: Process returncode
+        """
+        if self._started:
+            log.info("VPCS process has stopped, return code: %d", returncode)
+            self._started = False
+            self.status = "stopped"
+            self._process = None
+            if returncode != 0:
+                self.project.emit("log.error", {"message": "VPCS process has stopped, return code: {}\n{}".format(returncode, self.read_vpcs_stdout())})
 
     @asyncio.coroutine
     def stop(self):
@@ -250,7 +268,7 @@ class VPCSVM(BaseVM):
             self._terminate_process()
             if self._process.returncode is None:
                 try:
-                    yield from gns3server.utils.asyncio.wait_for_process_termination(self._process, timeout=3)
+                    yield from wait_for_process_termination(self._process, timeout=3)
                 except asyncio.TimeoutError:
                     if self._process.returncode is None:
                         log.warn("VPCS process {} is still running... killing it".format(self._process.pid))
@@ -261,6 +279,7 @@ class VPCSVM(BaseVM):
 
         self._process = None
         self._started = False
+        self.status = "stopped"
 
     @asyncio.coroutine
     def reload(self):

@@ -30,6 +30,7 @@ except ImportError:
 
 from .version import __version__
 from .config import Config
+from .utils.get_resource import get_resource
 
 import logging
 log = logging.getLogger(__name__)
@@ -51,10 +52,10 @@ class CrashReport:
     Report crash to a third party service
     """
 
-    DSN = "sync+https://3d569add80c74d4faecf90836bcdc1b5:3b5aa0c47c1847bc8d019b5e52ebdd1a@app.getsentry.com/38482"
+    DSN = "sync+https://630b20380e1f4b388a95888e18dc5045:e63cf59926ae4596832938614b0f9f02@app.getsentry.com/38482"
     if hasattr(sys, "frozen"):
-        cacert = os.path.join(os.getcwd(), "cacert.pem")
-        if os.path.isfile(cacert):
+        cacert = get_resource("cacert.pem")
+        if cacert is not None and os.path.isfile(cacert):
             DSN += "?ca_certs={}".format(cacert)
         else:
             log.warning("The SSL certificate bundle file '{}' could not be found".format(cacert))
@@ -62,6 +63,13 @@ class CrashReport:
 
     def __init__(self):
         self._client = None
+
+        # We don't want sentry making noise if an error is catched when you don't have internet
+        sentry_errors = logging.getLogger('sentry.errors')
+        sentry_errors.disabled = True
+
+        sentry_uncaught = logging.getLogger('sentry.errors.uncaught')
+        sentry_uncaught.disabled = True
 
     def capture_exception(self, request=None):
         if not RAVEN_AVAILABLE:

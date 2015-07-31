@@ -86,6 +86,7 @@ class Server:
 
         if self._handler:
             yield from self._handler.finish_connections()
+            self._handler = None
 
         for module in MODULES:
             log.debug("Unloading module {}".format(module.__name__))
@@ -163,6 +164,7 @@ class Server:
         except ssl.SSLError as e:
             log.critical("SSL error: {}".format(e))
             raise SystemExit
+        log.info("SSL is enabled")
         return ssl_context
 
     @asyncio.coroutine
@@ -175,6 +177,10 @@ class Server:
         yield from embed(globals(), locals(), return_asyncio_coroutine=True, patch_stdout=True)
 
     def _exit_handling(self):
+        """
+        Makes sure the asyncio loop is closed.
+        """
+
         def close_asyncio_loop():
             loop = None
             try:
@@ -226,9 +232,9 @@ class Server:
 
         log.info("Starting server on {}:{}".format(self._host, self._port))
         self._handler = app.make_handler(handler=RequestHandler)
-        self._loop.run_until_complete(self._run_application(self._handler, ssl_context))
+        server = self._run_application(self._handler, ssl_context)
+        self._loop.run_until_complete(server)
         self._signal_handling()
-
         self._exit_handling()
 
         if server_config.getboolean("live"):
@@ -245,3 +251,9 @@ class Server:
             # on Windows when the process gets the SIGBREAK signal
             # TypeError: async() takes 1 positional argument but 3 were given
             log.warning("TypeError exception in the loop {}".format(e))
+        finally:
+            if self._handler and self._loop.is_running():
+                self._loop.run_until_complete(self._handler.finish_connections())
+            server.close()
+            if self._loop.is_running():
+                self._loop.run_until_complete(app.finish())

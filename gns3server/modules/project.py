@@ -19,6 +19,7 @@ import aiohttp
 import os
 import shutil
 import asyncio
+import hashlib
 
 from uuid import UUID, uuid4
 from .port_manager import PortManager
@@ -64,6 +65,9 @@ class Project:
         self.temporary = temporary
         self._used_tcp_ports = set()
         self._used_udp_ports = set()
+
+        # clients listening for notifications
+        self._listeners = set()
 
         if path is None:
             path = os.path.join(self._location, self._id)
@@ -363,7 +367,7 @@ class Project:
             for future in done:
                 try:
                     future.result()
-                except Exception as e:
+                except (Exception, GeneratorExit) as e:
                     log.error("Could not close VM or device {}".format(e), exc_info=1)
 
         if cleanup and os.path.exists(self.path):
@@ -435,3 +439,65 @@ class Project:
         # We import it at the last time to avoid circular dependencies
         from ..modules import MODULES
         return MODULES
+
+    def emit(self, action, event):
+        """
+        Send an event to all the client listening for notifications
+
+        :param action: Action name
+        :param event: Event to send
+        """
+        for listener in self._listeners:
+            listener.put_nowait((action, event, ))
+
+    def get_listen_queue(self):
+        """Get a queue where you receive all the events related to the
+        project."""
+
+        queue = asyncio.Queue()
+        self._listeners.add(queue)
+        return queue
+
+    def stop_listen_queue(self, queue):
+        """Stop sending notification to this clients"""
+
+        self._listeners.remove(queue)
+
+    @asyncio.coroutine
+    def list_files(self):
+        """
+        :returns: Array of files in project without temporary files. The files are dictionnary {"path": "test.bin", "md5sum": "aaaaa"}
+        """
+
+        files = []
+        for (dirpath, dirnames, filenames) in os.walk(self.path):
+            for filename in filenames:
+                if not filename.endswith(".ghost"):
+                    path = os.path.relpath(dirpath, self.path)
+                    path = os.path.join(path, filename)
+                    path = os.path.normpath(path)
+                    file_info = {"path": path}
+
+                    try:
+                        file_info["md5sum"] = yield from wait_run_in_executor(self._hash_file, os.path.join(dirpath, filename))
+                    except OSError:
+                        continue
+                    files.append(file_info)
+
+        return files
+
+    def _hash_file(self, path):
+        """
+        Compute and md5 hash for file
+
+        :returns: hexadecimal md5
+        """
+
+        m = hashlib.md5()
+        with open(path, "rb") as f:
+            while True:
+                buf = f.read(128)
+                if not buf:
+                    break
+                m.update(buf)
+        return m.hexdigest()

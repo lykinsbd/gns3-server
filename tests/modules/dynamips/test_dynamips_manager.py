@@ -37,6 +37,7 @@ def test_vm_invalid_dynamips_path(manager):
         with pytest.raises(DynamipsError):
             manager.find_dynamips()
 
+
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="Not supported by Windows")
 def test_vm_non_executable_dynamips_path(manager):
     tmpfile = tempfile.NamedTemporaryFile()

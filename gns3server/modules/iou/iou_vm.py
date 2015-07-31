@@ -33,6 +33,7 @@ import configparser
 import struct
 import hashlib
 import glob
+import binascii
 
 from .iou_error import IOUError
 from ..adapters.ethernet_adapter import EthernetAdapter
@@ -41,8 +42,11 @@ from ..nios.nio_udp import NIOUDP
 from ..nios.nio_tap import NIOTAP
 from ..nios.nio_generic_ethernet import NIOGenericEthernet
 from ..base_vm import BaseVM
+from .utils.iou_import import nvram_import
+from .utils.iou_export import nvram_export
 from .ioucon import start_ioucon
 import gns3server.utils.asyncio
+import gns3server.utils.images
 
 
 import logging
@@ -82,7 +86,8 @@ class IOUVM(BaseVM):
         self.serial_adapters = 2  # one adapter = 4 interfaces
         self._use_default_iou_values = True  # for RAM & NVRAM values
         self._nvram = 128  # Kilobytes
-        self._initial_config = ""
+        self._startup_config = ""
+        self._private_config = ""
         self._ram = 256  # Megabytes
         self._l1_keepalives = False  # used to overcome the always-up Ethernet interfaces (not supported by all IOSes).
 
@@ -106,6 +111,7 @@ class IOUVM(BaseVM):
                         self.manager.port_manager.release_udp_port(nio.lport, self._project)
 
         yield from self.stop()
+        self.save_configs()
 
     @property
     def path(self):
@@ -136,27 +142,6 @@ class IOUVM(BaseVM):
             if os.path.isfile(fix_path):
                 self._path = fix_path
 
-        if not os.path.isfile(self._path) or not os.path.exists(self._path):
-            if os.path.islink(self._path):
-                raise IOUError("IOU image '{}' linked to '{}' is not accessible".format(self._path, os.path.realpath(self._path)))
-            else:
-                raise IOUError("IOU image '{}' is not accessible".format(self._path))
-
-        try:
-            with open(self._path, "rb") as f:
-                # read the first 7 bytes of the file.
-                elf_header_start = f.read(7)
-        except OSError as e:
-            raise IOUError("Cannot read ELF header for IOU image '{}': {}".format(self._path, e))
-
-        # IOU images must start with the ELF magic number, be 32-bit, little endian
-        # and have an ELF version of 1 normal IOS image are big endian!
-        if elf_header_start != b'\x7fELF\x01\x01\x01':
-            raise IOUError("'{}' is not a valid IOU image".format(self._path))
-
-        if not os.access(self._path, os.X_OK):
-            raise IOUError("IOU image '{}' is not executable".format(self._path))
-
     @property
     def use_default_iou_values(self):
         """
@@ -183,8 +168,29 @@ class IOUVM(BaseVM):
 
     def _check_requirements(self):
         """
-        Checks if IOUYAP executable is available.
+        Checks if IOUYAP executable is available and if image is accessible.
         """
+
+        if not os.path.isfile(self._path) or not os.path.exists(self._path):
+            if os.path.islink(self._path):
+                raise IOUError("IOU image '{}' linked to '{}' is not accessible".format(self._path, os.path.realpath(self._path)))
+            else:
+                raise IOUError("IOU image '{}' is not accessible".format(self._path))
+
+        try:
+            with open(self._path, "rb") as f:
+                # read the first 7 bytes of the file.
+                elf_header_start = f.read(7)
+        except OSError as e:
+            raise IOUError("Cannot read ELF header for IOU image '{}': {}".format(self._path, e))
+
+        # IOU images must start with the ELF magic number, be 32-bit, little endian
+        # and have an ELF version of 1 normal IOS image are big endian!
+        if elf_header_start != b'\x7fELF\x01\x01\x01':
+            raise IOUError("'{}' is not a valid IOU image".format(self._path))
+
+        if not os.access(self._path, os.X_OK):
+            raise IOUError("IOU image '{}' is not executable".format(self._path))
 
         path = self.iouyap_path
         if not path:
@@ -200,15 +206,18 @@ class IOUVM(BaseVM):
 
         iou_vm_info = {"name": self.name,
                        "vm_id": self.id,
+                       "vm_directory": self.working_dir,
                        "console": self._console,
                        "project_id": self.project.id,
                        "path": self.path,
+                       "md5sum": gns3server.utils.images.md5sum(self.path),
                        "ethernet_adapters": len(self._ethernet_adapters),
                        "serial_adapters": len(self._serial_adapters),
                        "ram": self._ram,
                        "nvram": self._nvram,
                        "l1_keepalives": self._l1_keepalives,
-                       "initial_config": self.relative_initial_config_file,
+                       "startup_config": self.relative_startup_config_file,
+                       "private_config": self.relative_private_config_file,
                        "iourc_path": self.iourc_path,
                        "use_default_iou_values": self._use_default_iou_values}
 
@@ -316,10 +325,10 @@ class IOUVM(BaseVM):
         :param new_name: name
         """
 
-        if self.initial_config_file:
-            content = self.initial_config_content
+        if self.startup_config_file:
+            content = self.startup_config_content
             content = content.replace(self._name, new_name)
-            self.initial_config_content = content
+            self.startup_config_content = content
 
         super(IOUVM, IOUVM).name.__set__(self, new_name)
 
@@ -422,6 +431,38 @@ class IOUVM(BaseVM):
                                                                                                          self.iourc_path,
                                                                                                          hostname))
 
+    def _push_configs_to_nvram(self):
+        """
+        Push the startup-config and private-config content to the NVRAM.
+        """
+
+        startup_config_content = self.startup_config_content
+        if startup_config_content:
+            nvram_file = os.path.join(self.working_dir, "nvram_{:05d}".format(self.application_id))
+            try:
+                if not os.path.exists(nvram_file):
+                    open(nvram_file, "a").close()
+                    nvram_content = None
+                else:
+                    with open(nvram_file, "rb") as file:
+                        nvram_content = file.read()
+            except OSError as e:
+                raise IOUError("Cannot read nvram file {}: {}".format(nvram_file, e))
+
+            startup_config_content = startup_config_content.encode("utf-8")
+            private_config_content = self.private_config_content
+            if private_config_content is not None:
+                private_config_content = private_config_content.encode("utf-8")
+            try:
+                nvram_content = nvram_import(nvram_content, startup_config_content, private_config_content, self.nvram)
+            except ValueError as e:
+                raise IOUError("Cannot push configs to nvram {}: {}".format(nvram_file, e))
+            try:
+                with open(nvram_file, "wb") as file:
+                    file.write(nvram_content)
+            except OSError as e:
+                raise IOUError("Cannot write nvram file {}: {}".format(nvram_file, e))
+
     @asyncio.coroutine
     def start(self):
         """
@@ -450,6 +491,8 @@ class IOUVM(BaseVM):
                 raise IOUError("iouyap is necessary to start IOU")
 
             self._create_netmap_config()
+            self._push_configs_to_nvram()
+
             # created a environment variable pointing to the iourc file.
             env = os.environ.copy()
 
@@ -468,6 +511,8 @@ class IOUVM(BaseVM):
                                                                                   env=env)
                 log.info("IOU instance {} started PID={}".format(self._id, self._iou_process.pid))
                 self._started = True
+                self.status = "started"
+                gns3server.utils.asyncio.monitor_process(self._iou_process, self._termination_callback)
             except FileNotFoundError as e:
                 raise IOUError("Could not start IOU: {}: 32-bit binary support is probably not installed".format(e))
             except (OSError, subprocess.SubprocessError) as e:
@@ -479,6 +524,20 @@ class IOUVM(BaseVM):
             self._start_ioucon()
             # connections support
             yield from self._start_iouyap()
+
+    def _termination_callback(self, returncode):
+        """
+        Called when the process has stopped.
+
+        :param returncode: Process returncode
+        """
+
+        log.info("IOU process has stopped, return code: %d", returncode)
+        self._terminate_process_iou()
+        self._terminate_process_iouyap()
+        self._ioucon_thread_stop_event.set()
+        if returncode != 0:
+            self.project.emit("log.error", {"message": "IOU process has stopped, return code: {}\n{}".format(returncode, self.read_iou_stdout())})
 
     def _rename_nvram_file(self):
         """
@@ -510,6 +569,7 @@ class IOUVM(BaseVM):
                                                                                  stderr=subprocess.STDOUT,
                                                                                  cwd=self.working_dir)
 
+                gns3server.utils.asyncio.monitor_process(self._iouyap_process, self._termination_callback)
             log.info("iouyap started PID={}".format(self._iouyap_process.pid))
         except (OSError, subprocess.SubprocessError) as e:
             iouyap_stdout = self.read_iouyap_stdout()
@@ -618,24 +678,28 @@ class IOUVM(BaseVM):
         Terminate the IOUYAP process if running.
         """
 
-        log.info('Stopping IOUYAP process for IOU VM "{}" PID={}'.format(self.name, self._iouyap_process.pid))
-        try:
-            self._iouyap_process.terminate()
-        # Sometime the process may already be dead when we garbage collect
-        except ProcessLookupError:
-            pass
+        if self._iouyap_process:
+            log.info('Stopping IOUYAP process for IOU VM "{}" PID={}'.format(self.name, self._iouyap_process.pid))
+            try:
+                self._iouyap_process.terminate()
+            # Sometime the process can already be dead when we garbage collect
+            except ProcessLookupError:
+                pass
 
     def _terminate_process_iou(self):
         """
         Terminate the IOU process if running
         """
 
-        log.info('Stopping IOU process for IOU VM "{}" PID={}'.format(self.name, self._iou_process.pid))
-        try:
-            self._iou_process.terminate()
-        # Sometime the process may already be dead when we garbage collect
-        except ProcessLookupError:
-            pass
+        if self._iou_process:
+            log.info('Stopping IOU process for IOU VM "{}" PID={}'.format(self.name, self._iou_process.pid))
+            try:
+                self._iou_process.terminate()
+            # Sometime the process can already be dead when we garbage collect
+            except ProcessLookupError:
+                pass
+        self._started = False
+        self.status = "stopped"
 
     @asyncio.coroutine
     def reload(self):
@@ -728,9 +792,11 @@ class IOUVM(BaseVM):
             command.extend(["-m", str(self._ram)])
         command.extend(["-L"])  # disable local console, use remote console
 
-        initial_config_file = self.initial_config_file
-        if initial_config_file:
-            command.extend(["-c", os.path.basename(initial_config_file)])
+        # do not let IOU create the NVRAM anymore
+        #startup_config_file = self.startup_config_file
+        # if startup_config_file:
+        #    command.extend(["-c", os.path.basename(startup_config_file)])
+
         if self._l1_keepalives:
             yield from self._enable_l1_keepalives(command)
         command.extend([str(self.application_id)])
@@ -862,7 +928,10 @@ class IOUVM(BaseVM):
                                                                                              port_number=port_number))
         if self.is_iouyap_running():
             self._update_iouyap_config()
-            os.kill(self._iouyap_process.pid, signal.SIGHUP)
+            try:
+                os.kill(self._iouyap_process.pid, signal.SIGHUP)
+            except ProcessLookupError:
+                log.error("Could not update iouyap configuration: process (PID={}) not found".format(self._iouyap_process.pid))
 
     def adapter_remove_nio_binding(self, adapter_number, port_number):
         """
@@ -894,8 +963,10 @@ class IOUVM(BaseVM):
                                                                                                  port_number=port_number))
         if self.is_iouyap_running():
             self._update_iouyap_config()
-            os.kill(self._iouyap_process.pid, signal.SIGHUP)
-
+            try:
+                os.kill(self._iouyap_process.pid, signal.SIGHUP)
+            except ProcessLookupError:
+                log.error("Could not update iouyap configuration: process (PID={}) not found".format(self._iouyap_process.pid))
         return nio
 
     @property
@@ -943,12 +1014,12 @@ class IOUVM(BaseVM):
             log.warn("could not determine if layer 1 keepalive messages are supported by {}: {}".format(os.path.basename(self._path), e))
 
     @property
-    def initial_config_content(self):
+    def startup_config_content(self):
         """
-        Returns the content of the current initial-config file.
+        Returns the content of the current startup-config file.
         """
 
-        config_file = self.initial_config_file
+        config_file = self.startup_config_file
         if config_file is None:
             return None
 
@@ -956,63 +1027,189 @@ class IOUVM(BaseVM):
             with open(config_file, "rb") as f:
                 return f.read().decode("utf-8", errors="replace")
         except OSError as e:
-            raise IOUError("Can't read configuration file '{}': {}".format(config_file, e))
+            raise IOUError("Can't read startup-config file '{}': {}".format(config_file, e))
 
-    @initial_config_content.setter
-    def initial_config_content(self, initial_config):
+    @startup_config_content.setter
+    def startup_config_content(self, startup_config):
         """
-        Update the initial config
+        Update the startup config
 
-        :param initial_config: content of the initial configuration file
+        :param startup_config: content of the startup configuration file
         """
 
         try:
-            initial_config_path = os.path.join(self.working_dir, "initial-config.cfg")
+            startup_config_path = os.path.join(self.working_dir, "startup-config.cfg")
 
-            if initial_config is None:
-                initial_config = ''
+            if startup_config is None:
+                startup_config = ''
 
-            # We disallow erasing the initial config file
-            if len(initial_config) == 0 and os.path.exists(initial_config_path):
+            # We disallow erasing the startup config file
+            if len(startup_config) == 0 and os.path.exists(startup_config_path):
                 return
 
-            with open(initial_config_path, 'w+', encoding='utf-8') as f:
-                if len(initial_config) == 0:
+            with open(startup_config_path, 'w+', encoding='utf-8') as f:
+                if len(startup_config) == 0:
                     f.write('')
                 else:
-                    initial_config = initial_config.replace("%h", self._name)
-                    f.write(initial_config)
+                    startup_config = startup_config.replace("%h", self._name)
+                    f.write(startup_config)
         except OSError as e:
-            raise IOUError("Can't write initial configuration file '{}': {}".format(initial_config_path, e))
+            raise IOUError("Can't write startup-config file '{}': {}".format(startup_config_path, e))
 
     @property
-    def initial_config_file(self):
+    def private_config_content(self):
         """
-        Returns the initial config file for this IOU VM.
+        Returns the content of the current private-config file.
+        """
+
+        config_file = self.private_config_file
+        if config_file is None:
+            return None
+
+        try:
+            with open(config_file, "rb") as f:
+                return f.read().decode("utf-8", errors="replace")
+        except OSError as e:
+            raise IOUError("Can't read private-config file '{}': {}".format(config_file, e))
+
+    @private_config_content.setter
+    def private_config_content(self, private_config):
+        """
+        Update the private config
+
+        :param private_config: content of the private configuration file
+        """
+
+        try:
+            private_config_path = os.path.join(self.working_dir, "private-config.cfg")
+
+            if private_config is None:
+                private_config = ''
+
+            # We disallow erasing the startup config file
+            if len(private_config) == 0 and os.path.exists(private_config_path):
+                return
+
+            with open(private_config_path, 'w+', encoding='utf-8') as f:
+                if len(private_config) == 0:
+                    f.write('')
+                else:
+                    private_config = private_config.replace("%h", self._name)
+                    f.write(private_config)
+        except OSError as e:
+            raise IOUError("Can't write private-config file '{}': {}".format(private_config_path, e))
+
+    @property
+    def startup_config_file(self):
+        """
+        Returns the startup-config file for this IOU VM.
 
         :returns: path to config file. None if the file doesn't exist
         """
 
-        path = os.path.join(self.working_dir, 'initial-config.cfg')
+        path = os.path.join(self.working_dir, 'startup-config.cfg')
         if os.path.exists(path):
             return path
         else:
             return None
 
     @property
-    def relative_initial_config_file(self):
+    def private_config_file(self):
         """
-        Returns the initial config file relative to the project directory.
-        It's compatible with pre 1.3 projects.
+        Returns the private-config file for this IOU VM.
 
         :returns: path to config file. None if the file doesn't exist
         """
 
-        path = os.path.join(self.working_dir, 'initial-config.cfg')
+        path = os.path.join(self.working_dir, 'private-config.cfg')
         if os.path.exists(path):
-            return 'initial-config.cfg'
+            return path
         else:
             return None
+
+    @property
+    def relative_startup_config_file(self):
+        """
+        Returns the startup-config file relative to the project directory.
+        It's compatible with pre 1.3 projects.
+
+        :returns: path to startup-config file. None if the file doesn't exist
+        """
+
+        path = os.path.join(self.working_dir, 'startup-config.cfg')
+        if os.path.exists(path):
+            return 'startup-config.cfg'
+        else:
+            return None
+
+    @property
+    def relative_private_config_file(self):
+        """
+        Returns the private-config file relative to the project directory.
+
+        :returns: path to private-config file. None if the file doesn't exist
+        """
+
+        path = os.path.join(self.working_dir, 'private-config.cfg')
+        if os.path.exists(path):
+            return 'private-config.cfg'
+        else:
+            return None
+
+    def extract_configs(self):
+        """
+        Gets the contents of the config files
+        startup-config and private-config from NVRAM.
+
+        :returns: tuple (startup-config, private-config)
+        """
+
+        nvram_file = os.path.join(self.working_dir, "nvram_{:05d}".format(self.application_id))
+        if not os.path.exists(nvram_file):
+            return None, None
+        try:
+            with open(nvram_file, "rb") as file:
+                nvram_content = file.read()
+        except OSError as e:
+            log.warning("Cannot read nvram file {}: {}".format(nvram_file, e))
+            return None, None
+
+        try:
+            startup_config_content, private_config_content = nvram_export(nvram_content)
+        except ValueError as e:
+            log.warning("Could not export configs from nvram file".format(nvram_file, e))
+            return None, None
+
+        return startup_config_content, private_config_content
+
+    def save_configs(self):
+        """
+        Saves the startup-config and private-config to files.
+        """
+
+        if self.startup_config_content or self.private_config_content:
+            startup_config_content, private_config_content = self.extract_configs()
+            if startup_config_content:
+                config_path = os.path.join(self.working_dir, "startup-config.cfg")
+                try:
+                    config = startup_config_content.decode("utf-8", errors="replace")
+                    config = "!\n" + config.replace("\r", "")
+                    with open(config_path, "wb") as f:
+                        log.info("saving startup-config to {}".format(config_path))
+                        f.write(config.encode("utf-8"))
+                except (binascii.Error, OSError) as e:
+                    raise IOUError("Could not save the startup configuration {}: {}".format(config_path, e))
+
+            if private_config_content:
+                config_path = os.path.join(self.working_dir, "private-config.cfg")
+                try:
+                    config = private_config_content.decode("utf-8", errors="replace")
+                    config = "!\n" + config.replace("\r", "")
+                    with open(config_path, "wb") as f:
+                        log.info("saving private-config to {}".format(config_path))
+                        f.write(config.encode("utf-8"))
+                except (binascii.Error, OSError) as e:
+                    raise IOUError("Could not save the private configuration {}: {}".format(config_path, e))
 
     @asyncio.coroutine
     def start_capture(self, adapter_number, port_number, output_file, data_link_type="DLT_EN10MB"):
@@ -1052,7 +1249,10 @@ class IOUVM(BaseVM):
 
         if self.is_iouyap_running():
             self._update_iouyap_config()
-            os.kill(self._iouyap_process.pid, signal.SIGHUP)
+            try:
+                os.kill(self._iouyap_process.pid, signal.SIGHUP)
+            except ProcessLookupError:
+                log.error("Could not update iouyap configuration: process (PID={}) not found".format(self._iouyap_process.pid))
 
     @asyncio.coroutine
     def stop_capture(self, adapter_number, port_number):
@@ -1085,4 +1285,7 @@ class IOUVM(BaseVM):
                                                                                                          port_number=port_number))
         if self.is_iouyap_running():
             self._update_iouyap_config()
-            os.kill(self._iouyap_process.pid, signal.SIGHUP)
+            try:
+                os.kill(self._iouyap_process.pid, signal.SIGHUP)
+            except ProcessLookupError:
+                log.error("Could not update iouyap configuration: process (PID={}) not found".format(self._iouyap_process.pid))

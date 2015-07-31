@@ -86,6 +86,7 @@ class Router(BaseVM):
             self._exec_area = 64  # 64 MB on other systems
         self._disk0 = 0  # Megabytes
         self._disk1 = 0  # Megabytes
+        self._auto_delete_disks = False
         self._aux = aux
         self._mac_addr = ""
         self._system_id = "FTX0945W0MY"  # processor board ID in IOS
@@ -127,10 +128,12 @@ class Router(BaseVM):
 
         router_info = {"name": self.name,
                        "vm_id": self.id,
+                       "vm_directory": os.path.join(self.project.module_working_directory(self.manager.module_name.lower())),
                        "project_id": self.project.id,
                        "dynamips_id": self._dynamips_id,
                        "platform": self._platform,
                        "image": self._image,
+                       "image_md5sum": md5sum(self._image),
                        "startup_config": self._startup_config,
                        "private_config": self._private_config,
                        "ram": self._ram,
@@ -144,6 +147,7 @@ class Router(BaseVM):
                        "exec_area": self._exec_area,
                        "disk0": self._disk0,
                        "disk1": self._disk1,
+                       "auto_delete_disks": self._auto_delete_disks,
                        "console": self._console,
                        "aux": self._aux,
                        "mac_addr": self._mac_addr,
@@ -157,14 +161,16 @@ class Router(BaseVM):
         for slot in self._slots:
             if slot:
                 slot = str(slot)
-                router_info["slot" + str(slot_number)] = slot
+            router_info["slot" + str(slot_number)] = slot
             slot_number += 1
 
         # add the wics
-        if self._slots[0] and self._slots[0].wics:
+        if len(self._slots) > 0 and self._slots[0] and self._slots[0].wics:
             for wic_slot_number in range(0, len(self._slots[0].wics)):
                 if self._slots[0].wics[wic_slot_number]:
                     router_info["wic" + str(wic_slot_number)] = str(self._slots[0].wics[wic_slot_number])
+                else:
+                    router_info["wic" + str(wic_slot_number)] = None
 
         return router_info
 
@@ -180,6 +186,16 @@ class Router(BaseVM):
 
     @asyncio.coroutine
     def create(self):
+
+        # delete any previous file with same Dynamips identifier
+        project_dir = os.path.join(self.project.module_working_directory(self.manager.module_name.lower()))
+        for file in glob.glob(os.path.join(project_dir, "c[0-9][0-9][0-9][0-9]_i{}_*".format(self._dynamips_id))):
+            try:
+                log.debug("Deleting file {}".format(file))
+                yield from wait_run_in_executor(os.remove, file)
+            except OSError as e:
+                log.warn("Could not delete file {}: {}".format(file, e))
+                continue
 
         if not self._hypervisor:
             module_workdir = self.project.module_working_directory(self.manager.module_name.lower())
@@ -250,7 +266,23 @@ class Router(BaseVM):
                 raise DynamipsError('"{}" is not a valid IOS image'.format(self._image))
 
             yield from self._hypervisor.send('vm start "{name}"'.format(name=self._name))
+            self.status = "started"
             log.info('router "{name}" [{id}] has been started'.format(name=self._name, id=self._id))
+            monitor_process(self._hypervisor.process, self._termination_callback)
+
+    @asyncio.coroutine
+    def _termination_callback(self, returncode):
+        """
+        Called when the process has stopped.
+
+        :param returncode: Process returncode
+        """
+
+        if self.status == "started":
+            self.status = "stopped"
+            log.info("Dynamips hypervisor process has stopped, return code: %d", returncode)
+            if returncode != 0:
+                self.project.emit("log.error", {"message": "Dynamips hypervisor process has stopped, return code: {}\n{}".format(returncode, self._hypervisor.read_stdout())})
 
     @asyncio.coroutine
     def stop(self):
@@ -261,6 +293,7 @@ class Router(BaseVM):
         status = yield from self.get_status()
         if status != "inactive":
             yield from self._hypervisor.send('vm stop "{name}"'.format(name=self._name))
+            self.status = "stopped"
             log.info('Router "{name}" [{id}] has been stopped'.format(name=self._name, id=self._id))
 
     @asyncio.coroutine
@@ -341,6 +374,20 @@ class Router(BaseVM):
                 pass
             yield from self.hypervisor.stop()
 
+        if self._auto_delete_disks:
+            # delete nvram and disk files
+            project_dir = os.path.join(self.project.module_working_directory(self.manager.module_name.lower()))
+            files = glob.glob(os.path.join(project_dir, "{}_i{}_disk[0-1]".format(self.platform, self.dynamips_id)))
+            files += glob.glob(os.path.join(project_dir, "{}_i{}_slot[0-1]".format(self.platform, self.dynamips_id)))
+            files += glob.glob(os.path.join(project_dir, "{}_i{}_nvram".format(self.platform, self.dynamips_id)))
+            files += glob.glob(os.path.join(project_dir, "{}_i{}_flash[0-1]".format(self.platform, self.dynamips_id)))
+            for file in files:
+                try:
+                    log.debug("Deleting file {}".format(file))
+                    yield from wait_run_in_executor(os.remove, file)
+                except OSError as e:
+                    log.warn("Could not delete file {}: {}".format(file, e))
+                    continue
         self._closed = True
 
     @property
@@ -416,9 +463,6 @@ class Router(BaseVM):
         """
 
         image = self.manager.get_abs_image_path(image)
-
-        if not os.path.isfile(image):
-            raise DynamipsError("IOS image '{}' is not accessible".format(image))
 
         yield from self._hypervisor.send('vm set_ios "{name}" "{image}"'.format(name=self._name, image=image))
 
@@ -850,6 +894,30 @@ class Router(BaseVM):
                                                                                                     new_disk1=disk1))
         self._disk1 = disk1
 
+    @property
+    def auto_delete_disks(self):
+        """
+        Returns True if auto delete disks is enabled on this router.
+
+        :returns: boolean either auto delete disks is activated or not
+        """
+
+        return self._auto_delete_disks
+
+    @asyncio.coroutine
+    def set_auto_delete_disks(self, auto_delete_disks):
+        """
+        Enable/disable use of auto delete disks
+
+        :param auto_delete_disks: activate/deactivate auto delete disks (boolean)
+        """
+
+        if auto_delete_disks:
+            log.info('Router "{name}" [{id}]: auto delete disks enabled'.format(name=self._name, id=self._id))
+        else:
+            log.info('Router "{name}" [{id}]: auto delete disks disabled'.format(name=self._name, id=self._id))
+        self._auto_delete_disks = auto_delete_disks
+
     @asyncio.coroutine
     def set_console(self, console):
         """
@@ -1178,10 +1246,20 @@ class Router(BaseVM):
             raise DynamipsError("Port {port_number} does not exist in adapter {adapter}".format(adapter=adapter,
                                                                                                 port_number=port_number))
 
-        yield from self._hypervisor.send('vm slot_add_nio_binding "{name}" {slot_number} {port_number} {nio}'.format(name=self._name,
-                                                                                                                     slot_number=slot_number,
-                                                                                                                     port_number=port_number,
-                                                                                                                     nio=nio))
+        try:
+            yield from self._hypervisor.send('vm slot_add_nio_binding "{name}" {slot_number} {port_number} {nio}'.format(name=self._name,
+                                                                                                                         slot_number=slot_number,
+                                                                                                                         port_number=port_number,
+                                                                                                                         nio=nio))
+        except DynamipsError:
+            # in case of error try to remove and add the nio binding
+            yield from self._hypervisor.send('vm slot_remove_nio_binding "{name}" {slot_number} {port_number}'.format(name=self._name,
+                                                                                                                      slot_number=slot_number,
+                                                                                                                      port_number=port_number))
+            yield from self._hypervisor.send('vm slot_add_nio_binding "{name}" {slot_number} {port_number} {nio}'.format(name=self._name,
+                                                                                                                         slot_number=slot_number,
+                                                                                                                         port_number=port_number,
+                                                                                                                         nio=nio))
 
         log.info('Router "{name}" [{id}]: NIO {nio_name} bound to port {slot_number}/{port_number}'.format(name=self._name,
                                                                                                            id=self._id,

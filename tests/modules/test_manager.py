@@ -26,6 +26,14 @@ from gns3server.modules.qemu import Qemu
 
 
 @pytest.fixture(scope="function")
+def vpcs(port_manager):
+    VPCS._instance = None
+    vpcs = VPCS.instance()
+    vpcs.port_manager = port_manager
+    return vpcs
+
+
+@pytest.fixture(scope="function")
 def qemu(port_manager):
     Qemu._instance = None
     qemu = Qemu.instance()
@@ -33,22 +41,14 @@ def qemu(port_manager):
     return qemu
 
 
-def test_create_vm_new_topology(loop, project, port_manager):
-
-    VPCS._instance = None
-    vpcs = VPCS.instance()
-    vpcs.port_manager = port_manager
+def test_create_vm_new_topology(loop, project, vpcs):
     vm_id = str(uuid.uuid4())
     vm = loop.run_until_complete(vpcs.create_vm("PC 1", project.id, vm_id))
     assert vm in project.vms
 
 
-def test_create_twice_same_vm_new_topology(loop, project, port_manager):
-
+def test_create_twice_same_vm_new_topology(loop, project, vpcs):
     project._vms = set()
-    VPCS._instance = None
-    vpcs = VPCS.instance()
-    vpcs.port_manager = port_manager
     vm_id = str(uuid.uuid4())
     vm = loop.run_until_complete(vpcs.create_vm("PC 1", project.id, vm_id, console=2222))
     assert vm in project.vms
@@ -57,17 +57,13 @@ def test_create_twice_same_vm_new_topology(loop, project, port_manager):
     assert len(project.vms) == 1
 
 
-def test_create_vm_new_topology_without_uuid(loop, project, port_manager):
-
-    VPCS._instance = None
-    vpcs = VPCS.instance()
-    vpcs.port_manager = port_manager
+def test_create_vm_new_topology_without_uuid(loop, project, vpcs):
     vm = loop.run_until_complete(vpcs.create_vm("PC 1", project.id, None))
     assert vm in project.vms
     assert len(vm.id) == 36
 
 
-def test_create_vm_old_topology(loop, project, tmpdir, port_manager):
+def test_create_vm_old_topology(loop, project, tmpdir, vpcs):
 
     with patch("gns3server.modules.project.Project.is_local", return_value=True):
         # Create an old topology directory
@@ -79,9 +75,6 @@ def test_create_vm_old_topology(loop, project, tmpdir, port_manager):
         with open(os.path.join(vm_dir, "startup.vpc"), "w+") as f:
             f.write("1")
 
-        VPCS._instance = None
-        vpcs = VPCS.instance()
-        vpcs.port_manager = port_manager
         vm_id = 1
         vm = loop.run_until_complete(vpcs.create_vm("PC 1", project.id, vm_id))
         assert len(vm.id) == 36
@@ -128,3 +121,27 @@ def test_get_relative_image_path(qemu, tmpdir):
         assert qemu.get_relative_image_path(path2) == "test2.bin"
         assert qemu.get_relative_image_path("test2.bin") == "test2.bin"
         assert qemu.get_relative_image_path("../test1.bin") == path1
+
+
+def test_list_images(loop, qemu, tmpdir):
+
+    fake_images = ["a.bin", "b.bin", ".blu.bin", "a.bin.md5sum"]
+    for image in fake_images:
+        with open(str(tmpdir / image), "w+") as f:
+            f.write("1")
+
+    with patch("gns3server.modules.Qemu.get_images_directory", return_value=str(tmpdir)):
+        assert loop.run_until_complete(qemu.list_images()) == [
+            {"filename": "a.bin"},
+            {"filename": "b.bin"}
+        ]
+
+
+def test_list_images_empty(loop, qemu, tmpdir):
+    with patch("gns3server.modules.Qemu.get_images_directory", return_value=str(tmpdir)):
+        assert loop.run_until_complete(qemu.list_images()) == []
+
+
+def test_list_images_directory_not_exist(loop, qemu):
+    with patch("gns3server.modules.Qemu.get_images_directory", return_value="/bla"):
+        assert loop.run_until_complete(qemu.list_images()) == []

@@ -57,6 +57,11 @@ VM_CREATE_SCHEMA = {
             "type": "string",
             "minLength": 1,
         },
+        "image_md5sum": {
+            "description": "checksum of the IOS image",
+            "type": ["string", "null"],
+            "minLength": 1,
+        },
         "startup_config": {
             "description": "path to the IOS startup configuration file",
             "type": "string",
@@ -119,6 +124,10 @@ VM_CREATE_SCHEMA = {
         "disk1": {
             "description": "disk1 size in MB",
             "type": "integer"
+        },
+        "auto_delete_disks": {
+            "description": "automatically delete nvram and disk files",
+            "type": "boolean"
         },
         "console": {
             "description": "console TCP port",
@@ -284,6 +293,11 @@ VM_UPDATE_SCHEMA = {
             "type": "string",
             "minLength": 1,
         },
+        "image_md5sum": {
+            "description": "checksum of the IOS image",
+            "type": ["string", "null"],
+            "minLength": 1,
+        },
         "startup_config_content": {
             "description": "Content of IOS startup configuration file",
             "type": "string",
@@ -336,6 +350,10 @@ VM_UPDATE_SCHEMA = {
         "disk1": {
             "description": "disk1 size in MB",
             "type": "integer"
+        },
+        "auto_delete_disks": {
+            "description": "automatically delete nvram and disk files",
+            "type": "boolean"
         },
         "console": {
             "description": "console TCP port",
@@ -509,6 +527,10 @@ VM_OBJECT_SCHEMA = {
             "maxLength": 36,
             "pattern": "^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$"
         },
+        "vm_directory": {
+            "decription": "Path to the VM working directory",
+            "type": "string"
+        },
         "project_id": {
             "description": "Project UUID",
             "type": "string",
@@ -536,6 +558,11 @@ VM_OBJECT_SCHEMA = {
         "image": {
             "description": "path to the IOS image",
             "type": "string",
+            "minLength": 1,
+        },
+        "image_md5sum": {
+            "description": "checksum of the IOS image",
+            "type": ["string", "null"],
             "minLength": 1,
         },
         "startup_config": {
@@ -590,6 +617,10 @@ VM_OBJECT_SCHEMA = {
         "disk1": {
             "description": "disk1 size in MB",
             "type": "integer"
+        },
+        "auto_delete_disks": {
+            "description": "automatically delete nvram and disk files",
+            "type": "boolean"
         },
         "console": {
             "description": "console TCP port",
@@ -744,5 +775,23 @@ VM_CONFIGS_SCHEMA = {
             "minLength": 1,
         },
     },
+    "additionalProperties": False,
+}
+
+VMS_LIST_SCHEMA = {
+    "$schema": "http://json-schema.org/draft-04/schema#",
+    "description": "List available Dynamips images",
+    "type": "array",
+    "items": [
+        {
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "description": "Image filename",
+                    "type": ["string"]
+                },
+            },
+        }
+    ],
     "additionalProperties": False,
 }
