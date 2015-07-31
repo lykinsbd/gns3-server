@@ -34,7 +34,6 @@ log = logging.getLogger(__name__)
 from ...base_vm import BaseVM
 from ..dynamips_error import DynamipsError
 from ..nios.nio_udp import NIOUDP
-
 from gns3server.utils.asyncio import wait_run_in_executor
 
 
